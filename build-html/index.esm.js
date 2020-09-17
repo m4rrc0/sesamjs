@@ -294,7 +294,7 @@ async function compileHtml(pageDef /*, options */) {
         let compImports = [];
         let compMounts = [];
         hydratableComponents.forEach((hc) => {
-          console.info(`component ${hc.srcPath} is hydratable`);
+          console.info(`component ${hc.srcPath} will be hydrated`);
           if (compImports.indexOf(hc.importPath) < 0) {
             compImports.push(hc.importPath);
           }
