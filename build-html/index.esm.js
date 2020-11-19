@@ -3,21 +3,25 @@ import * as path from "path";
 
 import * as glob from "glob";
 import JSON5 from "json5";
+const unescape = require("unescape");
 
-import slugify from "../utils/slugify";
-// import snowpackConfig from "../../snowpack.config.js";
-// import componentsInfos from "../../build-temp/components-infos.json";
-
-const userSnowpackConfigLoc = path.join(process.cwd(), "snowpack.config.js");
-const userSnowpackConfig = existsSync(userSnowpackConfigLoc)
-  ? require(userSnowpackConfigLoc)
-  : {};
+import makePageDef from "../utils/make-page-def";
+import minifyHtml from "../utils/minifyHtml";
 
 const {
-  browserConfig: { devOptions: { out: browserDir = "build" } = {} } = {},
-  ssrConfig: { devOptions: { out: ssrDir = "build-temp" } = {} } = {},
-} = userSnowpackConfig;
-const pagesDir = "_pages";
+  directories: {
+    browser: browserDir,
+    ssr: ssrDir,
+    pages: pagesDir,
+    htmlTemplate: htmlTemplateFile,
+  },
+  sesamOptions: { defaultLang },
+  buildOptions: { minify: shouldMinify },
+} = require("../utils/requireSnowpackConfig.js");
+
+const usePartialHydration = true;
+
+const htmlTemplate = require("../utils/requireHtmlTemplate.js");
 
 const componentsInfosLoc = path.join(
   process.cwd(),
@@ -27,99 +31,6 @@ const componentsInfosLoc = path.join(
 const componentsInfos = existsSync(componentsInfosLoc)
   ? require(componentsInfosLoc)
   : {};
-
-// const isPage = (destPath) => {
-//   // destPath is like "dist/_pages/tests/spa/index.js"
-//   const isAutoRoute = /^dist\/_pages\//.test(destPath);
-
-//   const component = destPath.replace("dist/", "");
-//   const isProgrammaticRoute =
-//     programmaticRoutes.filter(({ component: prComp }) => prComp === component)
-//       .length > 0;
-
-//   return isAutoRoute || isProgrammaticRoute;
-// };
-
-const makePageDef = ({
-  srcPath,
-  ssrPath: ssrP,
-  name: passedName,
-  path: p,
-  routeProps,
-}) => {
-  // srcPath is like /pages/tests OR /pages/tests/index WITHOUT extension
-  let ssrPath = ssrP || path.join(ssrDir, "/_dist_/", srcPath);
-  ssrPath = ssrPath.endsWith(".js") ? ssrPath : `${ssrPath}.js`;
-  // browserPath is the path to the browser version of the js file
-  const browserPath = ssrPath.replace(`${ssrDir}/`, `${browserDir}/`);
-  // relativePath is the path to the js file when the site is hosted / the base directory is 'browserDir'
-  const relativePath = browserPath.replace(`${browserDir}/`, "");
-
-  const relPathSplit = relativePath.split("/");
-  // name is the name of the js file or the parent dir if the js file is called 'index', hence the name of the html page
-  const tempName =
-    !passedName &&
-    relPathSplit[relPathSplit.length - 1]
-      .replace(/.h.js$/, "")
-      .replace(/.js$/, "");
-  // if the file is at the root of the pagesDir (and only then), keep 'index' as name
-  const name =
-    passedName ||
-    (tempName === "index" && relPathSplit.length > 3
-      ? relPathSplit[relPathSplit.length - 2]
-      : tempName
-    ).toLowerCase();
-  // relativeHtmlPath is the path to the html page (has to be placed at the root, out of the '_dist_/_pages/' directory)
-  const relativeHtmlPath =
-    p ||
-    slugify(
-      relativePath
-        .replace(/^_dist_\/_pages/, "")
-        .replace(/.h.js$/, "")
-        .replace(/.js$/, ""),
-      { keepSlashes: true }
-    );
-
-  // all pages are 'index.html' inside the appropriate folder
-  const relativeHtmlFilePath =
-    tempName === "index"
-      ? relativeHtmlPath
-      : path.join(relativeHtmlPath, "index");
-  // avoid double slashes in case path is '/' for example
-  const browserHtmlFilePath = path.join(
-    browserDir,
-    `${relativeHtmlFilePath}.html`
-  );
-
-  const importPath = /.js$/.test(relativePath)
-    ? relativePath
-    : `${relativePath}.js`;
-
-  // console.log({
-  //   ssrPath,
-  //   browserPath,
-  //   relativePath,
-  //   importPath,
-  //   relativeHtmlPath,
-  //   relativeHtmlFilePath,
-  //   browserHtmlFilePath,
-  //   name,
-  //   props: {},
-  // });
-
-  return {
-    srcPath,
-    ssrPath,
-    browserPath,
-    relativePath,
-    importPath,
-    relativeHtmlPath,
-    relativeHtmlFilePath,
-    browserHtmlFilePath,
-    name,
-    routeProps: { url: relativeHtmlPath, ...routeProps },
-  };
-};
 
 async function compileHtml(pageDef /*, options */) {
   // console.log({ pageDef });
@@ -134,6 +45,7 @@ async function compileHtml(pageDef /*, options */) {
     browserHtmlFilePath,
     name,
     routeProps,
+    lang,
     options: { noJS } = {},
   } = pageDef;
 
@@ -152,7 +64,7 @@ async function compileHtml(pageDef /*, options */) {
 
   if (!relativeHtmlPath || !relativePath) {
     console.error(
-      `unable to create HTML for page "${name}" because it is lacking relativeHtmlPath or relativePath. pageDef is`,
+      `unable to create HTML for page "${srcPath}" because it is lacking relativeHtmlPath or relativePath. pageDef is`,
       pageDef
     );
     return;
@@ -170,171 +82,351 @@ async function compileHtml(pageDef /*, options */) {
       path.join(process.cwd(), ssrPath),
       "utf-8"
     );
-    // IMPORTANT: for replacing nodes and hydrating, some info here: https://github.com/sveltejs/svelte/issues/1549
+
+    // IMPORTANT: for replacing nodes and hydrating, some info here (for Svelte 2!!!!!): https://github.com/sveltejs/svelte/issues/1549
 
     const pageInfos = componentsInfos[srcPath];
-
-    // TODO: if (pageInfos.shouldBeHydrated) -> we could skip most of this logic and go straight to the `importScripts`
-
-    // Retrieve import statements in file so that I have the file path corresponding to the components invocations
-    const componentsImported = CompStr.match(
-      // match things like 'import MainTitle from "../partials/MainTitle.js";'
-      /import.+\.js";/g
-    ).map((importStatementString) => {
-      const currentName = importStatementString
-        .replace("import ", "")
-        .replace(/ from.+/, "");
-
-      // TODO: more solid way to construct the import path
-      // currently the algo depends on the import statement navigating back to src,
-      // we can not navigate inside a sub dir or the importPath will not match
-      // INFO: for this to work, pages have to be in a separate folder than the children they call
-      const currentImportPath = importStatementString.replace(
-        /(\.\.\/)+/,
-        "/_dist_/"
-      );
-      const currentSrcPath = currentImportPath
-        .replace(/^.+"(.+)".+$/, (...match) => match[1])
-        .replace("/_dist_", "")
-        .replace(/\.js$/, "")
-        .replace(/\.h$/, "");
-
-      return {
-        importStatementString,
-        importPath: currentImportPath,
-        srcPath: currentSrcPath,
-        name: currentName,
-      };
-    });
-
-    // To retrieve components invocations throughout the file
-    const compInvocationRe = new RegExp(
-      /validate_component\((\w+), "(\w+)".+render.+result, (.+), .+, .+\n/,
-      "g"
-    );
-    // INFO: one invocation match is like [
-    //   'validate_component(CompName, "CompName").$$render($$result, { ...props }, {}, {\n', // the match
-    //   'CompName',
-    //   'CompName',
-    //   '{ ...props }',
-    //   index: 563,
-    //   input: '...the content of the ssr component file',
-    //   groups: undefined
-    // ]
-    // TODO: check how it works for slots. Is it implemented in another set of curlies?
-    // TODO: does it work if we use named imports? Is it a practice in Svelte?
-    const allComponentsInvocations = [
-      ...CompStr.matchAll(compInvocationRe),
-    ].map((invocation, i) => {
-      const currentName = invocation[1];
-      // We can provide props to a component by using its name as a key in the page props
-      // TODO: is it necessary? Aren't the props passed on page?
-      // Probably not -> I expect we'll have the reference to a variable, not the actual 'static' data
-      const currentRouteProps = routeProps && routeProps[currentName];
-      const staticProps = JSON5.parse(invocation[3]);
-      const currentCompInfos = pageInfos.children[i];
-      if (currentName !== currentCompInfos.name) {
-        console.warn(
-          `component names don't match: ${currentName}, ${currentCompInfos.name}`
-        );
-      }
-
-      // match the invocation with its import statement infos
-      const importInfos = componentsImported.filter(
-        ({ name: importName }) => importName === currentName
-      )[0];
-
-      // Extend information we have on the child component invoked thanks to our componentsInfos JSON
-      const extendedInfos = componentsInfos[importInfos.srcPath];
-
-      return {
-        ...extendedInfos,
-        ...importInfos,
-        ...currentCompInfos,
-        name: currentName,
-        props: {
-          ...staticProps,
-          ...currentRouteProps,
-        },
-      };
-    });
-
-    const hydratableComponents = allComponentsInvocations.filter((inv) => {
-      return inv.shouldBeHydrated;
-    });
+    // const hydratePage = !usePartialHydration || pageInfos.shouldBeHydrated;
 
     const { head, html, css } = Comp.render({
       ...routeProps,
     });
 
-    const importScripts = () => {
-      // if (/\.h\.js$/.test(importPath)) {
-      if (pageInfos.shouldBeHydrated) {
-        console.info(`page ${importPath} will be hydrated`);
-        return `
-          import Comp from '/${importPath}';
-          new Comp({
-              target: document.querySelector('#app'),
-              hydrate: true,
-              props: ${routeProps && JSON.stringify(routeProps)}
-          });
-        `;
+    // let importScripts = "";
+
+    // TODO: if (pageInfos.shouldBeHydrated) -> we could skip most of this logic and go straight to the `importScripts`
+
+    // if (false && hydratePage) {
+    //   console.info(`page ${importPath} will be hydrated`);
+    //   importScripts = `import Comp from '${importPath}';new Comp({target: document.querySelector('#app'),hydrate: true,props: ${
+    //     routeProps && JSON.stringify(routeProps)
+    //   }});`;
+    // } else {
+    //   // Retrieve import statements in file so that I have the file path corresponding to the components invocations
+    //   const componentsImported = CompStr.match(
+    //     // match things like 'import MainTitle from "../partials/MainTitle.js";'
+    //     /import.+\.js";/g
+    //   ).map((importStatementString) => {
+    //     const currentName = importStatementString
+    //       .replace("import ", "")
+    //       .replace(/ from.+/, "");
+
+    //     // TODO: more solid way to construct the import path
+    //     // currently the algo depends on the import statement navigating back to src,
+    //     // we can not navigate inside a sub dir or the importPath will not match
+    //     // INFO: for this to work, pages have to be in a separate folder than the children they call
+    //     const currentImportPath = importStatementString.replace(
+    //       /(\.\.\/)+/,
+    //       "/_dist_/"
+    //     );
+    //     const currentSrcPath = currentImportPath
+    //       .replace(/^.+"(.+)".+$/, (...match) => match[1])
+    //       .replace("/_dist_", "")
+    //       .replace(/\.js$/, "")
+    //       .replace(/\.h$/, "");
+
+    //     return {
+    //       importStatementString,
+    //       importPath: currentImportPath,
+    //       srcPath: currentSrcPath,
+    //       name: currentName,
+    //     };
+    //   });
+
+    // // To retrieve components invocations throughout the file
+    // const compInvocationRe = new RegExp(
+    //   /validate_component\((\w+), "(\w+)".{4}render.{3}result, (.+), (.+),/,
+    //   "g"
+    // );
+    // // INFO: one invocation match is like [
+    // //   'validate_component(CompName, "CompName").$$render($$result, { ...props }, {}, {\n', // the match
+    // //   'CompName',
+    // //   'CompName',
+    // //   '{ ...props }',
+    // //   index: 563,
+    // //   input: '...the content of the ssr component file',
+    // //   groups: undefined
+    // // ]
+    // // TODO: check how it works for slots. Is it implemented in another set of curlies?
+    // // TODO: does it work if we use named imports? Is it a practice in Svelte?
+    // const allComponentsInvocations = [
+    //   ...CompStr.matchAll(compInvocationRe),
+    // ].map((invocation, i) => {
+    //   // let [wholeMatch, currentName, , staticProps, staticBindings] = invocation
+    //   const currentName = invocation[1];
+    //   if (ssrPath === "build-temp/_dist_/_pages/index.js") {
+    //     console.log({ invocation });
+    //   }
+    //   // We can provide props to a component by using its name as a key in the page props
+    //   // TODO: is it necessary? Aren't the props passed on page?
+    //   // Probably not -> I expect we'll have the reference to a variable, not the actual 'static' data
+    //   const currentRouteProps = routeProps && routeProps[currentName];
+    //   let staticProps = {};
+    //   try {
+    //     staticProps = JSON5.parse(invocation[3]);
+    //   } catch (error) {
+    //     console.error(
+    //       `static props for ${currentName} in component ${srcPath} can not be parsed as JSON`
+    //     );
+    //   }
+    //   const { hid } = staticProps;
+    //   const currentCompInfos = pageInfos && pageInfos.children[i];
+    //   if (currentName !== (currentCompInfos && currentCompInfos.name)) {
+    //     console.warn(
+    //       `component names don't match: ${currentName}, ${
+    //         currentCompInfos && currentCompInfos.name
+    //       }`
+    //     );
+    //   }
+
+    //   // match the invocation with its import statement infos
+    //   // const importInfos = componentsImported.filter(
+    //   //   ({ name: importName }) => importName === currentName
+    //   // )[0];
+
+    //   // console.log({ componentsImported });
+
+    //   // Extend information we have on the child component invoked thanks to our componentsInfos JSON
+    //   // const extendedInfos = importInfos && componentsInfos[importInfos.srcPath];
+
+    //   return {
+    //     // ...extendedInfos,
+    //     // ...importInfos,
+    //     ...currentCompInfos,
+    //     name: currentName,
+    //     hid,
+    //     props: {
+    //       ...staticProps,
+    //       ...currentRouteProps,
+    //     },
+    //   };
+    // });
+
+    //   const hydratableComponents = allComponentsInvocations.filter((inv) => {
+    //     return inv.shouldBeHydrated;
+    //   });
+
+    //   if (hydratableComponents && hydratableComponents.length) {
+    //     // INFO: The normal component mount is replaced by `mountReplace` here
+    //     // to allow replacing the component instead of appending it to its parent
+    //     // new ${r.name}({
+    //     //   target: document.querySelector('#${r.name}'),
+    //     //   hydrate: true,
+    //     //   props: ${r.props && JSON.stringify(r.props)}
+    //     //   anchor:	null	// A child of target to render the component immediately before
+    //     //   intro:	false //	If true, will play transitions on initial render, rather than waiting for subsequent state changes
+    //     // });
+    //     let compImports = [];
+    //     let compMounts = [];
+    //     hydratableComponents.forEach((hc) => {
+    //       console.info(`component ${hc.srcPath} will be hydrated`);
+    //       if (compImports.indexOf(hc.importPath) < 0) {
+    //         compImports.push(hc.importPath);
+    //       }
+    //       compMounts.push(
+    //         `mountReplace(${
+    //           hc.name
+    //         },{target: document.querySelector('[data-hid="${
+    //           hc.hid
+    //         }"]'),props: ${hc.props && JSON.stringify(hc.props)}});`
+    //       );
+    //     });
+
+    //     importScripts = `import mountReplace from '/mountReplace.js';${compImports.join(
+    //       "\n"
+    //     )}${compMounts.join("\n")}`;
+    //   }
+    // }
+
+    // TODO: what we bo for html we should do for head as well probably
+    // TODO: props
+    // TODO: must work when there are multiple times the same component on the page
+
+    const hydratableSlots = [
+      ...html.matchAll(
+        /<([\w-]+)((?!>|<)[\s\S])+data-h(parent)((?!>|<)[\s\S])+>/g
+      ),
+    ].map(({ 0: hm, index: htmlIndex }) => {
+      // transform array of arrays into object of hydratable props { id, path, data }
+      const hprops = [
+        ...hm.matchAll(/(slot|data-h(parent))="([^"]*)"/g),
+      ].reduce((accu, { 1: hTypeFb, 2: hType, 3: hVal }) => {
+        return {
+          ...accu,
+          [hType || hTypeFb]: hVal,
+        };
+      }, {});
+
+      return {
+        htmlIndex,
+        ...hprops,
+      };
+    });
+
+    const hydratableMatches = [
+      // ...html.matchAll(/<([\w-]+)((?!>|<)[\s\S])+data-hpath="([\w-_/]*)"/g),
+      ...html.matchAll(
+        /<([\w-]+)((?!>|<)[\s\S])+data-h(path|id|data)((?!>|<)[\s\S])+>/g
+      ),
+    ].map(({ 0: hm, index: htmlIndex }) => {
+      // transform array of arrays into object of hydratable props { id, path, data }
+      const hprops = [...hm.matchAll(/data-h(path|id|data)="([^"]*)"/g)].reduce(
+        (accu, { 1: hType, 2: hVal }) => {
+          // let hValParsed;
+          // if (hType === "data") {
+          //   try {
+          //     hValParsed = !hVal ? {} : JSON5.parse(unescape(hVal));
+          //   } catch (error) {}
+          // }
+          return {
+            ...accu,
+            [hType]: hType === "data" ? unescape(hVal) : hVal,
+          };
+        },
+        {}
+      );
+
+      hprops.importName = hprops.path.replace(/\//g, "");
+      hprops.importStatement = `import ${hprops.importName} from '${path.join(
+        "/_dist_",
+        hprops.path
+      )}.js'`;
+
+      hprops.slots = hydratableSlots
+        .filter(({ parent }) => {
+          return parent === hprops.id;
+        })
+        .map(({ parent, slot }) => {
+          const qs = `[data-hparent="${parent}"]${
+            typeof slot !== "undefined" ? `[slot="${slot}"]` : ":not([slot])"
+          }`;
+          return `${slot || "default"}: document.querySelector('${qs}')`;
+        })
+        .join(",");
+
+      // try {
+      //   hprops.slots = JSON5.stringify(hprops.slots);
+      // } catch (error) {
+      //   console.error(
+      //     `Slots for parent ${hprops.id} does not have proper attributes`
+      //   );
+      //   hprops.slots = null;
+      // }
+
+      // if (typeof hprops.data === "string") {
+      //   console.error(
+      //     `hydratable props for ${hprops.id} in component ${srcPath} can not be parsed with JSON5`
+      //   );
+      // }
+
+      return {
+        htmlIndex,
+        ...hprops,
+      };
+    });
+
+    // console.log({ hydratableSlots, hydratableMatches });
+
+    let compImports = [];
+    let compMounts = [];
+    hydratableMatches.forEach(
+      ({
+        htmlIndex,
+        path: hSrcPath,
+        id: hid,
+        data: hdata = "{}",
+        importName,
+        importStatement,
+        slots,
+      }) => {
+        if (!hid || !hSrcPath) {
+          console.error(
+            `component ${hSrcPath} in page ${srcPath} can not be hydrated because it lacks data props`
+          );
+          return;
+        }
+
+        console.info(
+          `component ${hSrcPath} with id ${hid} will be hydrated on page ${srcPath}`
+        );
+        if (compImports.indexOf(importStatement) < 0) {
+          compImports.push(importStatement);
+        }
+        //////////////////////////////
+        // TODO: slots!
+        // Problem: is it because hydrated component does not have the same attributes anymore???
+        compMounts.push(
+          `mountReplace(${importName},{
+            target:document.querySelector('[data-hid="${hid}"]'),
+            hydrate:true,
+            props:{"hdata":${hdata}},
+            ${slots ? `slots: {${slots}}` : ""}
+          });`
+        );
       }
+    );
 
-      if (hydratableComponents) {
-        // INFO: The normal component mount is replaced by `mountReplace` here
-        // to allow replacing the component instead of appending it to its parent
-        // new ${r.name}({
-        //   target: document.querySelector('#${r.name}'),
-        //   hydrate: true,
-        //   props: ${r.props && JSON.stringify(r.props)}
-        //   anchor:	null	// A child of target to render the component immediately before
-        //   intro:	false //	If true, will play transitions on initial render, rather than waiting for subsequent state changes
-        // });
-        let compImports = [];
-        let compMounts = [];
-        hydratableComponents.forEach((hc) => {
-          console.info(`component ${hc.srcPath} will be hydrated`);
-          if (compImports.indexOf(hc.importPath) < 0) {
-            compImports.push(hc.importPath);
-          }
-          compMounts.push(`
-            mountReplace(${hc.name}, {
-            // target: document.querySelector('#${hc.name}'),
-            target: document.querySelector('[data-hid="${hc.hid}"]'),
-            props: ${hc.props && JSON.stringify(hc.props)}
-          });`);
-        });
+    // if (ssrPath === "build-temp/_dist_/_pages/index.js") {
+    //   // console.log({
+    //   //   str: CompStr.match("hid"),
+    //   //   html: html.match("data-hid="),
+    //   // });
+    //   console.log({ hydratableMatches });
+    // }
 
-        return `
-            import mountReplace from '/mountReplace.js';           
-            ${compImports.join("\n")}
-            ${compMounts.join("\n")}
-          `;
-      }
+    // const compImports = [`import MainTitle from '/partials/MainTitle.js;`];
+    // const compMounts = [
+    //   `mountReplace(MainTitle,
+    //     {target: document.querySelector('[data-hpath="/partials/MainTitle"]'),
+    //     props: {});`,
+    // ];
+    const importScripts = !compImports.length
+      ? ""
+      : `import mountReplace from '/mountReplace.js';
+        ${compImports.join("\n")}
+        ${compMounts.join("\n")}`;
+    // const importScripts = `
+    //   import mountReplace from '/mountReplace.js';
+    //   import partialsMainTitle from '/_dist_/partials/MainTitle.js';
+    //   import Routing from '/_dist_/pages/spa/Routing.js';
+    //   mountReplace(partialsMainTitle, {
+    //     target: document.querySelector('[data-hpath="/partials/MainTitle"]'),
+    //     props: {}
+    //   });
+    //   mountReplace(Routing, {
+    //     target: document.querySelector('[data-hpath="/pages/spa/Routing"]'),
+    //     props: {}
+    //   });`;
 
-      return "";
-    };
-
-    let outputHtml = `
-<!DOCTYPE html>
-  <html lang="en">
-  <head>
-    ${head}
-    <link rel="stylesheet" type="text/css" href="/global.css">
-    <style>${css && css.code}</style>
-  </head>
-  <body>
-    <div id="app">${html}</div>
-    ${!noJS ? `<script type="module">${importScripts()}</script>` : ""}
-  </body>
-</html>
-    `;
+    let outputHtml = htmlTemplate({
+      head,
+      css: css && css.code,
+      html,
+      importScripts,
+      lang,
+      routeProps,
+      // options: { noJS = false, isWatchMode = false },
+      // pageComponentPath = "/_dist_/_pages/index.js",
+    });
+    //     `
+    // <!DOCTYPE html>
+    //   <html lang="en">
+    //   <head>
+    //     ${head}
+    //     <link rel="stylesheet" type="text/css" href="/global.css">
+    //     <style>${css && css.code}</style>
+    //   </head>
+    //   <body>
+    //     <div id="app">${html}</div>
+    //     ${!noJS ? `<script type="module">${importScripts()}</script>` : ""}
+    //   </body>
+    // </html>
+    //     `;
 
     // TODO: Minify HTML files with html-minifier if in production.
-    // if (shouldMinify) {
-    //   outputHtml = await minifyHtml({ html: outputHtml });
-    // }
+    if (shouldMinify) {
+      outputHtml = await minifyHtml({ html: outputHtml });
+    }
 
     await fs.mkdir(path.dirname(browserHtmlFilePath), { recursive: true });
     await fs.writeFile(browserHtmlFilePath, outputHtml);
@@ -366,8 +458,12 @@ async function initialBuild() {
   try {
     programmaticPages =
       require(path.join(process.cwd(), "/src/routes.js")).default || [];
-  } catch {
-    console.info("no /src/routes.js file defined for programmatic page");
+  } catch (error) {
+    if (error.code === "MODULE_NOT_FOUND") {
+      console.info("no /src/routes.js file defined for programmatic page");
+    } else {
+      console.error(error);
+    }
   }
 
   // create pageDef
@@ -378,15 +474,33 @@ async function initialBuild() {
       .replace(/\.js$/, "")
       .replace(/\.h$/, "");
 
-    const pageDef = makePageDef({ srcPath, ssrPath });
+    const pageDef = makePageDef({
+      browserDir,
+      ssrDir,
+      srcPath,
+      ssrPath,
+      lang: defaultLang,
+    });
     return pageDef;
   });
+  if (typeof programmaticPages === "function") {
+    try {
+      programmaticPages = await programmaticPages().catch((error) =>
+        console.error(error)
+      );
+    } catch (error) {
+      console.error(`programmaticPages is a function but the call failed!!!`);
+    }
+  }
   programmaticPages = programmaticPages.map((route) => {
     const srcPath = path.join("/", route.component);
     const pageDef = makePageDef({
+      browserDir,
+      ssrDir,
       srcPath,
       name: route.name,
       path: route.path,
+      lang: route.lang || defaultLang,
       routeProps: route.props,
     });
     return pageDef;
@@ -394,19 +508,23 @@ async function initialBuild() {
 
   // Modify js files to properly import from the 'build-temp' folder
   // TODO: account for other imports as well, not only web_modules ?
-  await Promise.all(
-    ssrFiles.map(async (ssrPath) => {
-      // ssrPath is like 'build-temp/_dist_/_pages/index.js
-      const absolutePath = path.join(process.cwd(), "/build/web_modules");
-      const content = await fs.readFile(ssrPath, "utf-8");
-      const result = content.replace(
-        /from "\/web_modules/g,
-        `from "${absolutePath}`
-      );
+  // NOTE: might not be necessary anymore as it seems Snowpack has switched to relative paths
+  // await Promise.all(
+  //   ssrFiles.map(async (ssrPath) => {
+  //     // ssrPath is like 'build-temp/_dist_/_pages/index.js
+  //     const absolutePath = path.join(
+  //       process.cwd(),
+  //       `/${browserDir}/web_modules`
+  //     );
+  //     const content = await fs.readFile(ssrPath, "utf-8");
+  //     const result = content.replace(
+  //       /from "\/web_modules/g,
+  //       `from "${absolutePath}`
+  //     );
 
-      await fs.writeFile(ssrPath, result, "utf-8");
-    })
-  );
+  //     await fs.writeFile(ssrPath, result, "utf-8");
+  //   })
+  // );
 
   // console.log({ jsAutomaticPages });
 
@@ -421,7 +539,10 @@ async function initialBuild() {
 async function main() {
   await initialBuild();
 
-  // console.log({ snowpackConfig });
+  fs.copyFile(
+    path.join(__dirname, "/../public-scripts/mountReplace.js"),
+    path.join(process.cwd(), browserDir, "mountReplace.js")
+  );
 }
 
 main();

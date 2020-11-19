@@ -1,7 +1,7 @@
 const buildHtml = require("./build-html/index.js");
-const snowpackPluginSesamjs = require("./snowpack-plugin-sesamjs/plugin.js");
+const snowpackPluginSesam = require("./snowpack-plugin-sesam/index.js");
 const sveltePreprocessSesam = require("./svelte-preprocess-sesam/index.js");
 
 exports.buildHtml = buildHtml;
-exports.snowpackPluginSesamjs = snowpackPluginSesamjs;
+exports.snowpackPluginSesam = snowpackPluginSesam;
 exports.sveltePreprocessSesam = sveltePreprocessSesam;
