@@ -6,6 +6,8 @@ const svelteRollupPlugin = require("rollup-plugin-svelte");
 const fs = require("fs");
 const path = require("path");
 // import * as path from "path";
+const NodeCache = require("node-cache");
+const nodeCache = new NodeCache();
 
 import makePageDef from "../utils/make-page-def";
 
@@ -25,6 +27,13 @@ const htmlTemplate = require("../utils/requireHtmlTemplate.js");
 
 const routesLoc = path.join(process.cwd(), srcDir, routesFile);
 const routes = async () => {
+  // see in cache before to avoid refetching the same data multiple times
+  // TODO: it is still fetched multiple times on the first pass into the plugin
+  let cachedRoutesData = nodeCache.get("routes");
+  if (cachedRoutesData !== undefined) {
+    return cachedRoutesData;
+  }
+
   let r = existsSync(routesLoc) ? require(routesLoc) : [];
   r = typeof r.default !== "undefined" ? r.default : r; // to account for default export
   if (typeof r === "function") {
@@ -34,6 +43,8 @@ const routes = async () => {
       console.error(`routes is a function but the call failed!!!`);
     }
   }
+
+  nodeCache.set("routes", r);
 
   return r;
 };
@@ -78,6 +89,14 @@ module.exports = function plugin(snowpackConfig, pluginOptions = {}) {
       output: [".js", ".css"],
     },
     knownEntrypoints: ["svelte/internal"],
+    // async config(snowpackConfig) {
+    //   TODO: was looking for a method that runs once before any `load` all but this call ends after the first pass in `load`. Maybe it is just not async?
+    //   console.log("CONFIG CALL");
+    //   if (process.env.BUILD_STEP === "watch") {
+    //     await routes();
+    //   }
+    //   console.log("--END CONFIG CALL");
+    // },
     async load({ contents, filePath }) {
       // const fileContents = await fs.readFile(filePath, "utf-8");
       // let codeToCompile = fileContents;
@@ -149,7 +168,9 @@ module.exports = function plugin(snowpackConfig, pluginOptions = {}) {
           .replace(/\..+$/, "");
         const autoPageRe = new RegExp(`^/${pagesDir}`);
         const isAutoPage = autoPageRe.test(srcPath);
+
         const r = await routes();
+
         const correspondingRoutes = r
           .filter((r) => {
             return path.join("/", r.component) === srcPath;

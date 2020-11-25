@@ -1,5 +1,6 @@
 import { promises as fs, existsSync } from "fs";
 import * as path from "path";
+require("dotenv").config();
 
 import * as glob from "glob";
 import JSON5 from "json5";
