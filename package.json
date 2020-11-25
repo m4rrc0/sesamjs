@@ -22,9 +22,8 @@
     "prettier-plugin-svelte": "^1.4.0",
     "rollup-plugin-svelte": "^6.0.1",
     "snowpack": "^2.12.1",
-    "svelte": "^3.25.1"
-  },
-  "devDependencies": {
+    "svelte": "^3.25.1",
     "unescape": "^1.0.1"
-  }
+  },
+  "devDependencies": {}
 }
